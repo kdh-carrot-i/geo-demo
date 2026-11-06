@@ -1,0 +1,166 @@
+/* 지도 도구 (#/map) 전용 — 앱 전체에 로드되므로 모든 규칙을 .maptool 안으로 묶는다 (상권 검색 등의 .primary·.hint와 충돌 방지) */
+.maptool {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.maptool .mt-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #ddd;
+  background: #fcfcfb;
+}
+.maptool .mt-brand {
+  font-weight: 700;
+  color: #0b0b0b;
+  text-decoration: none;
+}
+.maptool .mt-top nav {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.maptool .mt-top nav a {
+  color: #52514e;
+  text-decoration: none;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.maptool .mt-top nav a.on,
+.maptool .mt-top nav a:hover {
+  background: #f0efec;
+  color: #0b0b0b;
+}
+.maptool .app {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.maptool .modes {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  margin: 10px 0 4px;
+}
+.maptool .modes button {
+  text-align: left;
+  padding: 7px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+.maptool .modes button.on {
+  border-color: #eb6834;
+  background: #fdf0ea;
+  font-weight: 600;
+}
+.maptool .hint {
+  color: #666;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.maptool .radius {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0;
+}
+.maptool .primary {
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: #2a78d6;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.maptool .primary:disabled {
+  background: #b7d3f6;
+  cursor: default;
+}
+.maptool .floors {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0;
+  max-height: 260px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+.maptool .floors li {
+  padding: 3px 0;
+  border-bottom: 1px solid #eee;
+}
+.maptool .panel {
+  width: 320px;
+  padding: 12px;
+  overflow-y: auto;
+  border-right: 1px solid #ddd;
+  background: #fafafa;
+  color: #222;
+  font-size: 14px;
+}
+.maptool .panel h1 {
+  font-size: 18px;
+  margin: 0 0 12px;
+}
+.maptool .panel h2 {
+  font-size: 15px;
+  margin: 16px 0 6px;
+}
+.maptool .search {
+  display: flex;
+  gap: 6px;
+}
+.maptool .search input {
+  flex: 1;
+  padding: 6px;
+}
+.maptool .basemap {
+  display: flex;
+  white-space: nowrap;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0;
+}
+.maptool .error {
+  color: #c0392b;
+}
+.maptool .hits {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.maptool .hits li {
+  padding: 6px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+}
+.maptool .hits li:hover {
+  background: #eef4ff;
+}
+.maptool .hits span {
+  color: #666;
+  font-size: 12px;
+}
+.maptool .info dl {
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  gap: 4px 8px;
+  margin: 0;
+}
+.maptool .info dt {
+  color: #666;
+}
+.maptool .info dd {
+  margin: 0;
+}
+.maptool .map {
+  flex: 1;
+}

@@ -1,0 +1,9 @@
+@import 'ol/ol.css';
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  font-family: 'Pretendard', 'Noto Sans KR', system-ui, sans-serif;
+}

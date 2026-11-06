@@ -1,0 +1,242 @@
+erDiagram
+    region_legal ||--o{ store : "ldong_cd"
+    region_admin ||--o{ store : "adong_cd"
+    region_admin ||--o{ trade_area_seoul : "adstrd_cd"
+    region_admin ||--o{ living_pop_dong_h : "adstrd_code_se"
+    region_admin }o--|| sgis_adm_stats : "sgis_adm_cd"
+    industry_store ||--o{ store : "inds_scls_cd"
+    industry_svc ||--o{ ta_sales_q : "svc_induty_cd"
+    industry_svc ||--o{ ta_store_q : "svc_induty_cd"
+    industry_map }o--|| industry_store : "scls_cd"
+    industry_map }o--|| industry_svc : "svc_induty_cd"
+    trade_area_seoul ||--o{ ta_sales_q : "trdar_cd"
+    trade_area_seoul ||--o{ ta_store_q : "trdar_cd"
+    trade_area_seoul ||--o{ ta_flpop_q : "trdar_cd"
+    trade_area_seoul ||--o{ ta_repop_q : "trdar_cd"
+    trade_area_seoul ||--o{ ta_wrcpop_q : "trdar_cd"
+    parcel ||--o{ store : "lno_cd = pnu"
+    parcel ||--o{ building : "pnu"
+    building ||--o{ store : "bld_mng_no"
+    store ||--o{ store_card_sales_m : "bizes_id (매칭)"
+    region_legal ||--o{ license_event : "bjd_cd"
+    region_legal ||--o{ trade_commercial : "sgg_cd"
+    region_legal ||--o{ trade_apt : "sgg_cd"
+    grid_100m ||--o{ store : "공간조인"
+
+    region_legal {
+        TEXT bjd_cd PK "법정동 10자리"
+        TEXT sido_cd
+        TEXT sgg_cd
+        TEXT umd_cd
+        TEXT locatadd_nm
+    }
+    region_admin {
+        TEXT adm_cd PK "행안부 행정동 8자리"
+        TEXT adm_nm
+        TEXT sgg_cd
+        TEXT sgg_nm
+        TEXT sgis_adm_cd "통계청 행정동 8자리"
+    }
+    sgis_adm_stats {
+        TEXT sgis_adm_cd PK
+        TEXT year PK
+        NUMERIC tot_ppltn
+        NUMERIC avg_age
+        NUMERIC household_cnt
+        NUMERIC corp_cnt
+        NUMERIC employee_cnt
+    }
+    trade_area_seoul {
+        TEXT trdar_cd PK "서울 상권코드"
+        TEXT trdar_se_cd "A골목 D발달 R전통시장 U관광특구"
+        TEXT trdar_cd_nm
+        TEXT adstrd_cd FK
+        REAL lon
+        REAL lat
+        NUMERIC relm_ar "면적 m2"
+    }
+    trade_zone_sbiz {
+        TEXT trar_no PK "소상공인 상권번호"
+        TEXT main_trar_nm
+        TEXT signgu_cd
+        NUMERIC trar_area
+        TEXT wkt "POLYGON WGS84"
+    }
+    industry_store {
+        TEXT scls_cd PK "상가정보 소분류"
+        TEXT lcls_cd
+        TEXT lcls_nm
+        TEXT mcls_cd
+        TEXT mcls_nm
+        TEXT scls_nm
+    }
+    industry_svc {
+        TEXT svc_induty_cd PK "서울 서비스업종 CS..."
+        TEXT svc_induty_cd_nm
+    }
+    industry_map {
+        TEXT scls_cd FK
+        TEXT svc_induty_cd FK
+        TEXT ftc_induty_nm "공정위 중분류"
+        TEXT ksic_cd
+        TEXT match_type
+    }
+    grid_100m {
+        TEXT grid_cd PK "국토지리정보원 100m"
+        REAL lon
+        REAL lat
+        TEXT adm_cd
+    }
+    store {
+        TEXT bizes_id PK "상가업소번호"
+        TEXT bizes_nm
+        TEXT inds_scls_cd FK
+        TEXT ksic_cd
+        TEXT adong_cd FK
+        TEXT ldong_cd FK
+        TEXT lno_cd "PNU 19"
+        TEXT bld_mng_no "건물관리번호 25"
+        TEXT flr_no
+        REAL lon
+        REAL lat
+        TEXT std_ym
+    }
+    license_event {
+        TEXT mgt_no PK "인허가 관리번호"
+        TEXT opn_svc_id "업종"
+        TEXT bplc_nm
+        TEXT apv_perm_ymd "인허가일"
+        TEXT dcb_ymd "폐업일"
+        TEXT trd_state_nm
+        NUMERIC site_area
+        REAL lon
+        REAL lat
+    }
+    ta_sales_q {
+        TEXT stdr_yyqu_cd PK
+        TEXT trdar_cd PK
+        TEXT svc_induty_cd PK
+        NUMERIC thsmon_selng_amt
+        NUMERIC thsmon_selng_co
+        NUMERIC tmzon_x_selng_amt "시간대 6구간"
+        NUMERIC agrde_x_selng_amt "연령 6구간"
+    }
+    ta_store_q {
+        TEXT stdr_yyqu_cd PK
+        TEXT trdar_cd PK
+        TEXT svc_induty_cd PK
+        NUMERIC stor_co
+        NUMERIC similr_induty_stor_co
+        NUMERIC frc_stor_co
+        NUMERIC opbiz_rt
+        NUMERIC clsbiz_rt
+    }
+    ta_flpop_q {
+        TEXT stdr_yyqu_cd PK
+        TEXT trdar_cd PK
+        NUMERIC tot_flpop_co
+        NUMERIC tmzon_x_flpop_co
+    }
+    ta_repop_q {
+        TEXT stdr_yyqu_cd PK
+        TEXT trdar_cd PK
+        NUMERIC tot_repop_co
+        NUMERIC tot_hshld_co
+        NUMERIC apt_hshld_co
+    }
+    ta_wrcpop_q {
+        TEXT stdr_yyqu_cd PK
+        TEXT trdar_cd PK
+        NUMERIC tot_wrc_popltn_co
+    }
+    living_pop_dong_h {
+        TEXT stdr_de_id PK
+        TEXT tmzon_pd_se PK
+        TEXT adstrd_code_se PK
+        NUMERIC tot_lvpop_co
+    }
+    subway_daily {
+        TEXT use_ymd PK
+        TEXT sbwy_rout_ln_nm PK
+        TEXT sbwy_stns_nm PK
+        NUMERIC gton_tnope
+        NUMERIC gtoff_tnope
+    }
+    subway_hourly_m {
+        TEXT use_mm PK
+        TEXT line_nm PK
+        TEXT station_nm PK
+        INTEGER hr PK
+        NUMERIC ride
+        NUMERIC alight
+    }
+    rone_stat {
+        TEXT statbl_id PK
+        TEXT wrttime_idtfr_id PK
+        INTEGER cls_id PK
+        INTEGER itm_id PK
+        TEXT statbl_nm
+        TEXT cls_fullnm "예: 서울>도심"
+        NUMERIC dta_val
+    }
+    trade_commercial {
+        INTEGER id PK
+        TEXT q_sgg_cd
+        TEXT q_deal_ym
+        NUMERIC deal_amount "만원"
+        NUMERIC building_ar
+        TEXT building_use
+        TEXT umd_nm
+    }
+    trade_apt {
+        INTEGER id PK
+        TEXT q_sgg_cd
+        TEXT q_deal_ym
+        TEXT apt_nm
+        NUMERIC deal_amount
+        NUMERIC exclu_use_ar
+    }
+    franchise_brand_y {
+        TEXT yr PK
+        TEXT corp_nm PK
+        TEXT brand_nm PK
+        TEXT induty_mlsfc_nm
+        NUMERIC frcs_cnt
+        NUMERIC avrg_sls_amt
+    }
+    franchise_cost_y {
+        TEXT yr PK
+        TEXT corp_nm PK
+        TEXT brand_nm PK
+        NUMERIC smtn_amt "창업비 합계 천원"
+    }
+    parcel {
+        TEXT pnu PK
+        TEXT jimok
+        NUMERIC area_m2
+        NUMERIC official_price
+        TEXT land_use
+    }
+    building {
+        TEXT bld_mng_no PK
+        TEXT pnu FK
+        TEXT bld_nm
+        NUMERIC grnd_flr_cnt
+        NUMERIC tot_area
+        TEXT main_purps
+    }
+    store_card_sales_m {
+        TEXT base_ym PK
+        TEXT store_key PK "카드 가맹점번호"
+        TEXT bizes_id FK "상가정보 매칭"
+        NUMERIC est_amt
+        NUMERIC est_cnt
+    }
+    meta_source {
+        TEXT table_name PK
+        TEXT source
+        TEXT std_period
+        INTEGER row_count
+        TEXT status
+        TEXT note
+    }

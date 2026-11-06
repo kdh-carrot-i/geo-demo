@@ -1,0 +1,7 @@
+# serve.py(모델 서빙) 실행에 필요한 패키지. 로컬 ml/.venv 와 같은 버전 (피클·모델 파일 호환)
+joblib==1.6.0
+lightgbm==4.7.0
+numpy==2.5.4
+pandas==3.1.0
+scikit-learn==1.9.1
+scipy==1.18.1

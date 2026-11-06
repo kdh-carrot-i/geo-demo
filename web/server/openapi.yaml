@@ -1,0 +1,1827 @@
+openapi: 3.1.0
+info:
+  title: 상권 경쟁력 분석 Agent API
+  version: 0.1.0-draft
+  description: |
+    출점·출자 검토용 의사결정 **참고** API. 좌표·로드뷰 이미지·상호·업종을 받아
+    상권 점수, 매출 예측 범위, 지표, 리포트, 대화형 질의를 제공한다.
+
+    - 결과는 참고용이며 투자 판단을 대신하지 않는다. 모든 수치에 출처(`provenance`)와 신뢰등급(A/B/C)을 붙인다.
+    - 서울과 전국은 제공 항목이 다르다. 위치별 제공 범위는 `GET /v1/coverage`로 먼저 확인한다.
+    - 분석은 수십 초가 걸리므로 비동기다: `POST /v1/assessments` → `202` → `GET /v1/assessments/{id}` 폴링 (또는 `?wait=30`).
+    - 사업자번호는 상태 확인에만 쓰고 저장·응답·학습에 사용하지 않는다.
+
+    설계 문서: docs/08_API_명세.md
+servers:
+  - url: http://127.0.0.1:8787/api
+    description: 로컬 개발
+security:
+  - ApiKey: []
+tags:
+  - name: assessments
+    description: 입지 평가 (점수·매출·지표·리포트)
+  - name: chat
+    description: 평가 결과에 대한 대화형 질의
+  - name: areas
+    description: 상권 일대 분석 (업종 분포·배치, 인구, 교통, 시설, 임대료, 매출)
+  - name: reference
+    description: 제공 범위, 업종 코드
+
+paths:
+  /v1/assessments:
+    get:
+      tags: [assessments]
+      operationId: listAssessments
+      summary: 지난 평가 목록 (최신순)
+      description: 심사 화면의 "지난 평가" 목록용.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        assessment_id: { type: string }
+                        created_at: { type: string, format: date-time }
+                        status: { $ref: '#/components/schemas/Status' }
+                        client_ref: { type: [string, 'null'] }
+                        address: { type: [string, 'null'] }
+                        industry: { type: [string, 'null'] }
+                        score: { type: [number, 'null'] }
+                        grade: { type: [string, 'null'] }
+                        error: { type: [string, 'null'], description: status=failed일 때 사유 제목 }
+              example:
+                items:
+                  - { assessment_id: asm_lRhcO0pYuoCj32GoI15A, created_at: '2026-10-30T07:18:25Z', status: done, client_ref: deal-2026-0412, address: 서울특별시 중구 세종대로 110, industry: 백반/한정식, score: 41.8, grade: C, error: null }
+    post:
+      tags: [assessments]
+      operationId: createAssessment
+      summary: 입지 평가 요청
+      description: 좌표 또는 주소 중 하나는 필수. 로드뷰 이미지가 없으면 `roadview_auto=true`일 때 좌표로 자동 수집한다.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: 같은 키로 재요청하면 기존 평가를 돌려준다 (24시간).
+          schema: { type: string, maxLength: 64 }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/AssessmentRequest' }
+            encoding:
+              roadview_images:
+                contentType: image/jpeg, image/png, image/webp
+          application/json:
+            schema: { $ref: '#/components/schemas/AssessmentRequestJson' }
+            examples:
+              seoul_full:
+                summary: 서울 · 업종·면적·사업자번호까지 (권장)
+                value:
+                  {
+                    "lat": 37.5663,
+                    "lng": 126.9779,
+                    "industry": "한식",
+                    "floor_area_m2": 66,
+                    "store_name": "OO식당",
+                    "biz_no": "1234567890",
+                    "radius_m": 300,
+                    "client_ref": "deal-2026-0412"
+                  }
+              address_only:
+                summary: 주소와 업종만
+                value:
+                  {
+                    "address": "서울 마포구 동교로 240",
+                    "industry": "카페"
+                  }
+              store_name_only:
+                summary: 상호로 업종 추정 (신뢰도 낮음)
+                value:
+                  {
+                    "lat": 37.5009,
+                    "lng": 127.0365,
+                    "store_name": "스타벅스"
+                  }
+              outside_seoul:
+                summary: 서울 밖 — 유동인구는 경기 실측 학습 추정값(내부 심사 한정), 매출 예측은 준비 중 안내
+                value:
+                  {
+                    "address": "부산 해운대구 달맞이길117번길 11",
+                    "industry": "카페",
+                    "floor_area_m2": 50
+                  }
+              non_food:
+                summary: 음식점 외 업종 — 생존 확률 없이 계산, 등급 최대 B
+                value:
+                  {
+                    "lat": 37.4979,
+                    "lng": 127.0276,
+                    "industry": "미용실"
+                  }
+              invalid_radius:
+                summary: (오류 예시) 반경 200 → 400 "반경(radius_m)은 100, 300, 500, 1000 중 하나입니다"
+                value:
+                  {
+                    "lat": 37.5663,
+                    "lng": 126.9779,
+                    "industry": "카페",
+                    "radius_m": 200
+                  }
+              invalid_biz_no:
+                summary: (오류 예시) 사업자번호 하이픈 → 400 "하이픈 없이 숫자 10자리"
+                value:
+                  {
+                    "lat": 37.5663,
+                    "lng": 126.9779,
+                    "industry": "한식",
+                    "biz_no": "124-81-00998"
+                  }
+              with_roadview_base64:
+                summary: 로드뷰 이미지를 base64로 (JSON)
+                value:
+                  {
+                    "lat": 37.5636,
+                    "lng": 126.9828,
+                    "industry": "I21007",
+                    "floor_area_m2": 40,
+                    "roadview_images_base64": [
+                      {
+                        "media_type": "image/jpeg",
+                        "data": "/9j/4AAQSkZJRgABAQ...(생략)"
+                      }
+                    ]
+                  }
+      responses:
+        '202':
+          description: 접수됨
+          headers:
+            Location:
+              schema: { type: string }
+              description: /v1/assessments/{id}
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssessmentAccepted' }
+              example:
+                {
+                  "assessment_id": "asm_lRhcO0pYuoCj32GoI15A",
+                  "status": "queued",
+                  "estimated_seconds": 40,
+                  "links": {
+                    "self": "/api/v1/assessments/asm_lRhcO0pYuoCj32GoI15A",
+                    "report": "/api/v1/assessments/asm_lRhcO0pYuoCj32GoI15A/report",
+                    "messages": "/api/v1/assessments/asm_lRhcO0pYuoCj32GoI15A/messages"
+                  }
+                }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /v1/assessments/{assessment_id}:
+    get:
+      tags: [assessments]
+      operationId: getAssessment
+      summary: 평가 결과 조회
+      parameters:
+        - $ref: '#/components/parameters/AssessmentId'
+        - name: wait
+          in: query
+          description: 완료될 때까지 최대 N초 대기 (long polling). 0이면 즉시 반환.
+          schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
+      responses:
+        '200':
+          description: 평가 (status가 done이 아니면 일부 필드가 비어 있음)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assessment' }
+              examples:
+                done:
+                  summary: 완료 — 서울 시청 앞 한식 66㎡ (실제 결과, vision·summary는 형식 예시)
+                  value:
+                    {
+                      "assessment_id": "asm_lRhcO0pYuoCj32GoI15A",
+                      "status": "done",
+                      "created_at": "2026-10-30T07:18:25Z",
+                      "completed_at": "2026-10-30T07:18:57Z",
+                      "client_ref": "deal-2026-0412",
+                      "location": {
+                        "lat": 37.5663,
+                        "lng": 126.9779,
+                        "address_road": "서울특별시 중구 세종대로 110",
+                        "address_jibun": "서울 중구 태평로1가 31",
+                        "pnu": "1114010300100310000",
+                        "adm_cd": "11140550",
+                        "adm_nm": "명동",
+                        "sgg_nm": "중구",
+                        "sido_nm": "서울특별시",
+                        "trade_area": {
+                          "code": "3120023",
+                          "name": "서울시청",
+                          "type": "발달상권",
+                          "distance_m": 193
+                        },
+                        "coverage": "seoul"
+                      },
+                      "industry": {
+                        "code": "I20101",
+                        "name": "백반/한정식",
+                        "mcls_name": "한식",
+                        "lcls_name": "음식",
+                        "method": "input",
+                        "franchise_brand": null,
+                        "confidence": "B",
+                        "seoul_cs": "CS100001",
+                        "license_uptae": "한식"
+                      },
+                      "business_check": {
+                        "status": "active",
+                        "tax_type": "부가가치세 일반과세자",
+                        "checked_at": "2026-10-30T07:18:26Z"
+                      },
+                      "score": {
+                        "total": 41.8,
+                        "grade": "C",
+                        "survival_3y_prob": 0.6292,
+                        "components": [
+                          {
+                            "key": "survival",
+                            "label": "3년 생존",
+                            "value": 25.3,
+                            "weight": 0.5,
+                            "basis": "3년 내 폐업 확률 37% (같은 업태 신규 개업 34,417곳과 비교)",
+                            "confidence": "B"
+                          },
+                          {
+                            "key": "demand",
+                            "label": "수요",
+                            "value": 48.4,
+                            "weight": 0.15,
+                            "basis": "서울 상권 중 유동 상위 52%, 직장 상위 4%, 상주 상위 98%",
+                            "confidence": "A"
+                          },
+                          {
+                            "key": "competition",
+                            "label": "경쟁 강도",
+                            "value": 35.7,
+                            "weight": 0.15,
+                            "basis": "반경 300m 동일 업종 73곳 / 전체 1189곳, 입지계수 1.29",
+                            "confidence": "B"
+                          },
+                          {
+                            "key": "sales_power",
+                            "label": "매출력",
+                            "value": 98.3,
+                            "weight": 0.1,
+                            "basis": "이 상권 같은 업종 점포당 매출이 서울 1402개 상권 중 상위 2%",
+                            "confidence": "A"
+                          },
+                          {
+                            "key": "vision",
+                            "label": "로드뷰",
+                            "value": 67.0,
+                            "weight": 0.1,
+                            "basis": "로드뷰 2장 판독 (접근성·가시성·밀집도·시설 등 평균)",
+                            "confidence": "C"
+                          }
+                        ],
+                        "evidence_weight": 1.0,
+                        "model_version": "score-v0.1"
+                      },
+                      "sales_forecast": {
+                        "unit": "KRW/month",
+                        "model_version": "sales-v0",
+                        "confidence": "C",
+                        "p10": 25960000,
+                        "p50": 121420000,
+                        "p90": 528840000,
+                        "benchmark": {
+                          "value": 193530000,
+                          "scope": "상권 서울시청 · 백반/한정식 · 20262 · 점포 58곳 평균",
+                          "confidence": "A"
+                        },
+                        "note": "처음 보는 상권 기준 오차 중앙값 약 59% (docs/08 6장). 범위로 해석하십시오."
+                      },
+                      "indicators": {
+                        "floating_pop": {
+                          "quarter_total": 504304,
+                          "by_time": {
+                            "00-06": 0.08,
+                            "06-11": 0.227,
+                            "11-14": 0.236,
+                            "14-17": 0.22,
+                            "17-21": 0.184,
+                            "21-24": 0.054
+                          },
+                          "share_2030": 0.403,
+                          "weekend_share": 0.159,
+                          "as_of": "20262",
+                          "scope": "상권 서울시청 · 20262"
+                        },
+                        "living_pop": {
+                          "hourly_avg": 37988,
+                          "by_time": {
+                            "00-06": 0.065,
+                            "06-11": 0.219,
+                            "11-14": 0.227,
+                            "14-17": 0.229,
+                            "17-21": 0.198,
+                            "21-24": 0.062
+                          },
+                          "as_of": "20260731",
+                          "scope": "행정동 명동 · 서울 생활인구 최근 1주"
+                        },
+                        "residents": {
+                          "population": 12,
+                          "households": 10,
+                          "apt_households": 0,
+                          "scope": "상권 서울시청 · 20262"
+                        },
+                        "workers": {
+                          "workers": 15371,
+                          "businesses": 8437,
+                          "scope": "상권 서울시청 · 20262"
+                        },
+                        "competitors": {
+                          "radius_m": 300,
+                          "same_industry": 73,
+                          "same_mcls": 110,
+                          "all_stores": 1189,
+                          "branch_share": 0.301,
+                          "location_quotient": 1.286,
+                          "nearest": [
+                            {
+                              "name": "대한트럭",
+                              "industry": "백반/한정식",
+                              "distance_m": 7,
+                              "floor": null
+                            },
+                            {
+                              "name": "더진국서울 시청점",
+                              "industry": "백반/한정식",
+                              "distance_m": 92,
+                              "floor": null
+                            },
+                            {
+                              "name": "도시락 광화문",
+                              "industry": "백반/한정식",
+                              "distance_m": 99,
+                              "floor": null
+                            }
+                          ],
+                          "scope": "소상공인 상가정보 2026Q2"
+                        },
+                        "food_license_churn": {
+                          "radius_m": 300,
+                          "active": 268,
+                          "opened_12m": 41,
+                          "closed_12m": 43,
+                          "as_of": "2026-10-28"
+                        },
+                        "rent": null,
+                        "buildings": null,
+                        "land_price": {
+                          "official_price_per_m2": 62570000,
+                          "year_month": "2025-01"
+                        }
+                      },
+                      "vision": {
+                        "images_used": 2,
+                        "area_type": "오피스상권",
+                        "scores": {
+                          "pedestrian": 70,
+                          "accessibility": 75,
+                          "visibility": 55,
+                          "commercial_density": 65,
+                          "facility_condition": 70
+                        },
+                        "observations": {
+                          "road": "왕복 8차로 대로변, 이면도로 진입부",
+                          "sidewalk": "폭 3m 이상 보도",
+                          "visible_stores": [
+                            {
+                              "name": "판독불가",
+                              "industry": "식당",
+                              "floor": "1층"
+                            }
+                          ],
+                          "vacancy_signs": []
+                        },
+                        "cannot_tell": [
+                          "점심 외 시간대 유동",
+                          "실제 임대료·권리금"
+                        ],
+                        "confidence": "C",
+                        "model": "claude-opus-5-5"
+                      },
+                      "summary": {
+                        "headline": "직장인 점심 수요는 강하나 반경 300m 한식 밀집, 3년 생존 확률은 하위권",
+                        "opportunities": [
+                          "직장인구가 서울 상권 중 상위 4%",
+                          "같은 상권 한식 점포당 매출이 서울 상위 2%"
+                        ],
+                        "risks": [
+                          "반경 300m 한식 73곳, 입지계수 1.29로 평균보다 밀집",
+                          "주변 음식점 최근 1년 폐업 43곳으로 개업(41곳)보다 많음",
+                          "상주인구가 거의 없어 주말·저녁 수요 약함"
+                        ],
+                        "unknowns": [
+                          "실제 임대료·권리금",
+                          "건물 내 층·면적별 임대 조건"
+                        ]
+                      },
+                      "provenance": [
+                        {
+                          "source": "카카오 로컬",
+                          "dataset": "주소·행정동 변환",
+                          "as_of": "realtime",
+                          "used_for": [
+                            "location"
+                          ]
+                        },
+                        {
+                          "source": "소상공인시장진흥공단",
+                          "dataset": "상가(상권)정보",
+                          "as_of": "2026Q2 (20260630)",
+                          "used_for": [
+                            "competitors",
+                            "industry"
+                          ]
+                        },
+                        {
+                          "source": "행정안전부",
+                          "dataset": "지방행정 인허가 (일반음식점)",
+                          "as_of": "2026-10-28",
+                          "used_for": [
+                            "survival",
+                            "food_license_churn"
+                          ]
+                        },
+                        {
+                          "source": "서울시",
+                          "dataset": "상권분석서비스 (유동·상주·직장인구, 추정매출)",
+                          "as_of": "20262",
+                          "used_for": [
+                            "demand",
+                            "sales_power",
+                            "sales_forecast"
+                          ]
+                        },
+                        {
+                          "source": "서울시",
+                          "dataset": "생활인구 (행정동)",
+                          "as_of": "20260731",
+                          "used_for": [
+                            "living_pop"
+                          ]
+                        },
+                        {
+                          "source": "통계청 SGIS",
+                          "dataset": "행정동 인구·가구·사업체",
+                          "as_of": "최신 연도",
+                          "used_for": [
+                            "residents",
+                            "workers"
+                          ]
+                        },
+                        {
+                          "source": "브이월드",
+                          "dataset": "연속지적 공시지가",
+                          "as_of": "2025-01",
+                          "used_for": [
+                            "land_price"
+                          ]
+                        },
+                        {
+                          "source": "고객 제공 로드뷰 이미지",
+                          "dataset": "Claude 판독 (claude-opus-5-5)",
+                          "as_of": "request",
+                          "used_for": [
+                            "vision"
+                          ]
+                        }
+                      ],
+                      "warnings": [],
+                      "disclaimer": "본 결과는 공공·추정 데이터 기반 참고 자료이며 투자 또는 출자 판단을 대신하지 않습니다.",
+                      "usage": {
+                        "llm_input_tokens": 9800,
+                        "llm_output_tokens": 1400,
+                        "elapsed_ms": 31500
+                      }
+                    }
+                running:
+                  summary: 분석 중
+                  value:
+                    {
+                      "assessment_id": "asm_lRhcO0pYuoCj32GoI15A",
+                      "status": "running",
+                      "created_at": "2026-10-30T07:18:25Z",
+                      "completed_at": null,
+                      "client_ref": "deal-2026-0412"
+                    }
+                failed:
+                  summary: 실패 — 주소를 찾지 못함
+                  value:
+                    {
+                      "assessment_id": "asm_VkZ1mDyBHeaxcguvXKFG",
+                      "status": "failed",
+                      "created_at": "2026-10-30T07:06:40Z",
+                      "completed_at": "2026-10-30T07:06:41Z",
+                      "client_ref": null,
+                      "error": {
+                        "title": "주소를 찾을 수 없음",
+                        "status": 422,
+                        "detail": "지오코딩 결과가 없습니다: 서울 없는로 1"
+                      }
+                    }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/assessments/{assessment_id}/report:
+    get:
+      tags: [assessments]
+      operationId: getAssessmentReport
+      summary: 리포트 다운로드
+      parameters:
+        - $ref: '#/components/parameters/AssessmentId'
+        - name: format
+          in: query
+          schema: { type: string, enum: [html, pdf, json], default: html }
+      responses:
+        '200':
+          description: 리포트
+          content:
+            text/html: { schema: { type: string } }
+            application/pdf: { schema: { type: string, format: binary, description: '준비 중 (501) — 지금은 html을 인쇄해 PDF로 저장' } }
+            application/json: { schema: { $ref: '#/components/schemas/Report' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 아직 분석 중
+          content:
+            application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+
+  /v1/assessments/{assessment_id}/messages:
+    post:
+      tags: [chat]
+      operationId: postMessage
+      summary: 평가 결과에 대해 질문 (대화형)
+      description: |
+        평가 결과와 내부 도구(경쟁점 목록, 매출 벤치마크 등)를 근거로 답한다.
+        `Accept: text/event-stream`이면 SSE로 스트리밍하고, 아니면 완성된 답을 JSON으로 돌려준다.
+        대화 이력은 평가 단위로 서버에 보관된다.
+      parameters:
+        - $ref: '#/components/parameters/AssessmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string, maxLength: 4000, examples: ['반경 300m 안 카페 중 최근 1년 사이 폐업한 곳은?'] }
+      responses:
+        '200':
+          description: 답변
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatReply' }
+              example:
+                {
+                  "message_id": "msg_Q2w8Lr0aZk3PdX9cVb1n",
+                  "text": "네, 많은 편입니다. 반경 300m 안에 같은 업종(백반/한정식)이 73곳으로, 서울 평균 대비 1.29배 밀집되어 있습니다(경쟁 강도, 소상공인 상가정보 2026Q2). 최근 1년 사이 주변 음식점은 41곳이 문을 열고 43곳이 닫았습니다(지방행정 인허가).",
+                  "citations": [
+                    {
+                      "source": "소상공인시장진흥공단",
+                      "dataset": "상가(상권)정보",
+                      "as_of": "2026Q2 (20260630)",
+                      "used_for": [
+                        "competitors"
+                      ]
+                    }
+                  ]
+                }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  이벤트: `delta` {text}, `done` {message_id, citations}, `error` {title, detail}
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 평가가 아직 끝나지 않음
+          content:
+            application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    get:
+      tags: [chat]
+      operationId: listMessages
+      summary: 대화 이력
+      parameters:
+        - $ref: '#/components/parameters/AssessmentId'
+      responses:
+        '200':
+          description: 이력
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: '#/components/schemas/ChatMessage' }
+
+  /v1/coverage:
+    get:
+      tags: [reference]
+      operationId: getCoverage
+      summary: 위치별 제공 범위
+      description: 해당 위치에서 어떤 항목을 어떤 신뢰등급으로 제공할 수 있는지 미리 알려 준다 (과금 없음).
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, minimum: 33, maximum: 39 } }
+        - { name: lng, in: query, required: true, schema: { type: number, minimum: 124, maximum: 132 } }
+      responses:
+        '200':
+          description: 제공 범위
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Coverage' }
+              examples:
+                seoul:
+                  summary: 서울 상권 안
+                  value:
+                    {
+                      "coverage": "seoul",
+                      "adm_nm": "명동",
+                      "trade_area": {
+                        "code": "3120023",
+                        "name": "서울시청",
+                        "type": "발달상권",
+                        "distance_m": 193
+                      },
+                      "items": {
+                        "score": {
+                          "available": true,
+                          "confidence": "B",
+                          "note": "생존 확률은 음식점 업종 (다른 업종은 업종별 인허가 데이터 추가 예정)"
+                        },
+                        "sales_forecast": {
+                          "available": true,
+                          "confidence": "C",
+                          "note": "범위로 제공"
+                        },
+                        "floating_pop": {
+                          "available": true,
+                          "confidence": "A",
+                          "note": ""
+                        },
+                        "competitors": {
+                          "available": true,
+                          "confidence": "A",
+                          "note": ""
+                        },
+                        "rent": {
+                          "available": false,
+                          "note": "준비 중 — R-ONE 상업용부동산 임대동향 연결 예정 (데이터 확보됨)"
+                        }
+                      }
+                    }
+                national:
+                  summary: 서울 밖 (부산)
+                  value:
+                    {
+                      "coverage": "national",
+                      "adm_nm": "우1동",
+                      "trade_area": null,
+                      "items": {
+                        "score": {
+                          "available": true,
+                          "confidence": "B",
+                          "note": "생존 확률은 음식점 업종 (다른 업종은 업종별 인허가 데이터 추가 예정)"
+                        },
+                        "sales_forecast": {
+                          "available": false,
+                          "confidence": "C",
+                          "note": "준비 중 — 서울 밖은 학습용 매출 데이터(점포 카드매출) 확보 후 제공"
+                        },
+                        "floating_pop": {
+                          "available": false,
+                          "confidence": "A",
+                          "note": "전국 유동인구는 확보 검토 중 (통신사 데이터·기존 DW 백업분). 지금은 주거·직장인구로 대신함"
+                        },
+                        "competitors": {
+                          "available": false,
+                          "confidence": "A",
+                          "note": "준비 중 — 전국 상가정보 적재 예정 (공공데이터포털 운영계정 전환 후)"
+                        }
+                      }
+                    }
+
+  /v1/industries:
+    get:
+      tags: [reference]
+      operationId: searchIndustries
+      summary: 업종 코드 검색
+      description: 요청의 `industry`에 넣을 코드를 찾는다. 기준은 소상공인 상가정보 소분류 (247개).
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: '업종명 일부 (예: 카페)' }
+      responses:
+        '200':
+          description: 업종 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Industry' }
+
+  /v1/buildings/at:
+    get:
+      tags: [areas]
+      operationId: getBuildingAt
+      summary: 건물(동) 상세 — 누른 지점의 동 외곽선 + 그 동의 건축물대장·추정 거주인구
+      description: |
+        지도 도구의 "건물(동) 선택" 클릭. 아파트 대단지처럼 필지(PNU) 하나에 여러 동이 있는 곳을 동별로 나눠 본다.
+        1) VWorld 건축물정보(LT_C_BLDGINFO, 국토교통부 GIS건물통합정보)에서 그 지점의 동 외곽선·동 이름·층수
+        2) 그 지점의 필지(PNU) → 건축물대장 표제부(전체 쪽) 중 동 이름이 같은 것 ("제101동" = "101동")
+        3) 거주인구 추정 = 그 동 세대수 × 행정동 평균 가구원수(SGIS 인구 ÷ 가구). 실제 동별 주민 수는 공개되지 않음 — 필요하면 SGIS 집계구 통계(포털 신청)
+        점포는 상가정보에 동 정보가 없어(전국 0%) 필지 단위 개수만 준다. 층별개요는 한 번에 100건까지라 앞 500건만 보며, 대단지는 일부 동의 층별 목록이 빠진다(floors_note).
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number }, example: 37.4985 }
+        - { name: lng, in: query, required: true, schema: { type: number }, example: 127.1085 }
+      responses:
+        '200':
+          description: 건물(동) 상세
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outline:
+                    type: object
+                    properties:
+                      geometry: { type: object, description: 'GeoJSON (MultiPolygon, EPSG:4326)' }
+                      name: { type: string, examples: [헬리오시티] }
+                      dong: { type: string, examples: [101동] }
+                      floors_above: { type: [integer, 'null'] }
+                      floors_below: { type: [integer, 'null'] }
+                      source: { type: string }
+                  pnu: { type: [string, 'null'] }
+                  address: { type: [string, 'null'] }
+                  register: { type: [object, 'null'], description: '그 동의 표제부 (Indicators.buildings.buildings[] 형식) + floors(그 동의 층별개요) + floors_note. 연결 못 하면 null' }
+                  match: { type: string, description: 표제부를 어떻게 연결했는지 (동 이름 / 필지에 건물 하나 / 층수 추정 / 실패) }
+                  residents:
+                    type: [object, 'null']
+                    description: 주택일 때만
+                    properties:
+                      households: { type: integer }
+                      persons_per_household: { type: number }
+                      persons: { type: integer }
+                      basis: { type: string }
+                  parcel:
+                    type: object
+                    description: 같은 필지(단지) 전체
+                    properties:
+                      buildings: { type: integer, description: 주건축물 수 (부속건축물 제외) }
+                      households: { type: [integer, 'null'] }
+                      stores: { type: integer }
+                      store_note: { type: string }
+                  sources: { type: array, items: { type: string } }
+        '404':
+          description: 그 지점에 건물 외곽선 없음
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/parcels/{pnu}:
+    get:
+      tags: [areas]
+      operationId: getParcel
+      summary: 필지 상세 (건축물대장 + 입점 점포)
+      description: 지도 도구의 "필지 선택" 클릭. 건축물대장 표제부(앞 30건, 전체 건수는 buildings.buildings_total)·층별개요(국토교통부 건축HUB, 실시간)와 그 필지(PNU)에 입점한 상가정보 점포 목록(최대 300)을 준다. 아파트 단지처럼 한 필지에 여러 동이 있으면 동별 정보는 GET /buildings/at.
+      parameters:
+        - { name: pnu, in: path, required: true, schema: { type: string, pattern: '^\d{19}$' }, description: 19자리 필지 고유번호, example: '1168010100108260000' }
+      responses:
+        '200':
+          description: 필지 상세
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pnu: { type: string }
+                  buildings: { type: [object, 'null'], description: '건축물대장 (Indicators.buildings와 같은 형식). 없으면 null' }
+                  stores:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      by_lcls: { type: array, items: { type: object, properties: { name: { type: string }, count: { type: integer } } } }
+                      items: { type: array, items: { type: object, properties: { name: { type: string }, industry: { type: string }, lcls: { type: string }, floor: { type: [string, 'null'] }, ho: { type: [string, 'null'] }, building: { type: [string, 'null'] } } } }
+                      as_of: { type: string }
+                  sources: { type: array, items: { type: string } }
+        '400':
+          description: PNU 형식 오류
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/watch:
+    get:
+      tags: [areas]
+      operationId: listWatch
+      summary: 출자 매장 모니터링 목록
+      description: 등록한 매장마다 등록 때(기준선)와 지금을 비교한 경보 수준(warn·watch·ok)과 신호 상위 3개.
+      responses:
+        '200': { description: 목록, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { type: object } } } } } } }
+        '401':
+          description: 인증 실패 (AGENT_API_KEYS가 설정된 경우)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    post:
+      tags: [areas]
+      operationId: addWatch
+      summary: 출자 매장 모니터링 등록
+      description: 지금의 주변 상황(반경 안 점포·같은 업종·같은 브랜드·인허가 개폐업·1층 임대료·공실률)을 기준선으로 저장한다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, lat, lng]
+              properties:
+                name: { type: string }
+                lat: { type: number }
+                lng: { type: number }
+                industry_code: { type: string, description: 상가정보 소분류 코드 }
+                industry_name: { type: string }
+                brand: { type: string }
+                radius_m: { type: integer, default: 500, minimum: 100, maximum: 1000 }
+                memo: { type: string }
+      responses:
+        '201': { description: '등록 결과 (GET /watch/{id}와 같은 형식)' }
+        '400':
+          description: 요청 형식 오류
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/watch/{id}:
+    get:
+      tags: [areas]
+      operationId: getWatch
+      summary: 모니터링 매장 상세 (기준선 vs 지금, 신호)
+      description: |
+        신호: 같은 브랜드 신규 근접(warn), 같은 업종 신규 진입(100m 안이면 warn), 반경 안 폐업 급증(warn), 개업 < 폐업 순감(watch), 1층 임대료 ±5%, 공실률 +2%p.
+        상가정보 점포 비교는 분기 파일이 새로 적재된 뒤에 나타난다.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 상세 }
+        '404':
+          description: 없는 매장
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [areas]
+      operationId: deleteWatch
+      summary: 모니터링에서 빼기
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: 삭제됨 }
+        '404':
+          description: 없는 매장
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/opportunities:
+    get:
+      tags: [areas]
+      operationId: findOpportunities
+      summary: 유망 입지 찾기
+      description: |
+        업종 하나를 골라 전국(또는 시도) 소상공인 상권영역 중 "상권은 활발한데 이 업종은 덜 밀집하고, 곧 입주가 몰리는 곳" 순위를 준다.
+        점포 100곳 이상 상권만 비교. 활성도 = 전체 점포 수 백분위, 여유도 = 100 − 50 × 입지계수(시도 대비),
+        성장 = 상권 경계 1km 안 3년 내 입주 예정 세대(100세대 이상 단지, 건축HUB 주택인허가) ÷ 50 (최대 100).
+        점수 = 활성도 45% + 여유도 45% + 성장 10%. 현재 인구·임대료·매출을 반영하지 않은 1차 선별이므로 `GET /areas/report?id=`로 확인한다.
+      parameters:
+        - { name: industry, in: query, required: true, schema: { type: string }, description: '상가정보 소분류 코드 (GET /industries)', example: I21201 }
+        - { name: sido, in: query, schema: { type: string }, description: '시도 이름 앞부분 (예: 부산광역시, 서울)' }
+        - { name: sgg, in: query, schema: { type: string }, description: '시군구 (sido와 함께). 점수는 시도 기준 그대로, 이 시군구 상권만 거른다. "수원시"처럼 시 이름이면 그 시의 구 전부. 고를 수 있는 값은 응답의 sgg_options' }
+        - { name: limit, in: query, schema: { type: integer, default: 30, maximum: 100 } }
+        - { name: upcoming, in: query, schema: { type: boolean, default: false }, description: 'true면 입주 예정 단지가 가까운 상권만 (점수·순위는 그대로)' }
+      responses:
+        '200':
+          description: 순위
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  industry: { type: object, properties: { code: { type: string }, name: { type: string } } }
+                  sido: { type: [string, 'null'] }
+                  count: { type: integer, description: 점수를 매긴 상권 수 (시도 또는 전국) }
+                  count_filtered: { type: integer, description: 시군구로 거른 뒤 상권 수 }
+                  sgg: { type: [string, 'null'] }
+                  sgg_options: { type: array, items: { type: object, properties: { name: { type: string }, zones: { type: integer } } } }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, description: '/areas/report?id= 에 그대로 넣는다' }
+                        rank: { type: integer, description: 시도(또는 전국) 안 순위 }
+                        name: { type: string }
+                        sido: { type: string }
+                        sgg: { type: string }
+                        stores_total: { type: integer }
+                        same_industry: { type: integer }
+                        lq: { type: number }
+                        activity: { type: number }
+                        room: { type: number }
+                        upcoming_hh: { type: integer, description: 3년 안 입주 예정 세대 (상권 경계 1km 안) }
+                        growth: { type: number, description: '0~100 (5,000세대 = 100)' }
+                        upcoming:
+                          type: array
+                          description: 가까운 입주 예정 단지 상위 3곳
+                          items: { type: object, properties: { name: { type: [string, 'null'] }, hh: { type: integer }, move_in: { type: string, description: 입주(사용검사) 예정일 YYYYMMDD }, distance_m: { type: integer } } }
+                        score: { type: number }
+                        note: { type: [string, 'null'] }
+                  method: { type: string }
+        '400':
+          description: 업종 코드 오류
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/areas:
+    get:
+      tags: [areas]
+      operationId: searchAreas
+      summary: 상권 검색
+      description: |
+        상권·역·거리 이름으로 분석 범위 후보를 찾는다. 후보 순서 = 범위를 정하는 규칙의 우선순위다.
+        1. `sbiz_zone` 소상공인 상권영역 — **경계 다각형** (전국 1,227곳, "선릉역1번 출구"처럼 출구별 영역은 하나로 합침)
+        2. `seoul_trdar` 서울 상권분석 상권 — 중심점 + 면적을 원으로 바꾼 반경
+        3. `rone_area` 한국부동산원 임대동향 조사 상권 — 대표 지점 + 반경 500m
+        4. `place` 주소·카카오 장소 — 검색 지점 + 반경 500m. 카카오 장소는 기본으로 역·관광지·시장처럼 상권 중심이 될 만한 곳만 5개, `all_places=true`면 카카오 결과 전부(최대 45). 도로·지역 이름 주소는 다른 후보가 있으면 뺌
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2 }, description: '상권 이름 (예: 선릉역, 서면역, 강남대로, 광안리, 동대구)' }
+        - { name: all_places, in: query, schema: { type: boolean, default: false }, description: '카카오 장소를 거르지 않고 전부 (최대 45)' }
+      responses:
+        '200':
+          description: 후보 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AreaCandidate' } }
+                  places:
+                    type: object
+                    description: 장소 후보를 몇 개 보여 줬는지
+                    properties:
+                      shown: { type: integer }
+                      total: { type: integer, description: 카카오가 돌려준 전체 개수 (최대 45) }
+                      filter: { type: string }
+              examples:
+                seolleung:
+                  summary: 선릉역 — 경계 있는 상권영역이 첫 후보
+                  value:
+                    items:
+                      - { id: 'zone:10133.10134', name: 선릉역, kind: sbiz_zone, detail: '서울특별시 강남구 · 소상공인 상권영역 2곳 합침 (선릉역1번 출구, 선릉역7번 출구) · 548천㎡', lat: 37.5028, lng: 127.0506, boundary: polygon, radius_m: null }
+                      - { id: 'seoul:3120210', name: 선릉역, kind: seoul_trdar, detail: '서울 강남구 · 서울시 상권분석 발달상권 · 중심에서 반경 339m (면적 환산)', lat: 37.5046, lng: 127.0494, boundary: circle, radius_m: 339 }
+        '400':
+          description: 검색어가 2글자 미만
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/areas/report:
+    get:
+      tags: [areas]
+      operationId: getAreaReport
+      summary: 상권 일대 리포트
+      description: |
+        `GET /areas`의 후보 `id`로 상권 일대를 집계해 바로 돌려준다 (보통 3~8초, 같은 id는 30분 캐시).
+        - 업종: 대분류 비중과 같은 시도 대비 배수(특화 업종), 대분류별 중분류, 음식점 중분류(한식·중식…), 소분류 상위, 층 분포, 지점명 비중, 지도용 점포 점(최대 5,000)
+        - 변화: 분기 점포 증감(이전 스냅샷이 있는 서울), 음식점 인허가 연도별 개업·폐업
+        - 인구: 서울 상권분석 상권 합산(유동·상주·직장, 시간대·연령) + 범위에 걸친 행정동(SGIS 인구·가구·종사자, 서울 생활인구, 서울 밖 유동인구 — 내부 심사 한정)
+        - 교통·시설: 카카오 장소 기준 지하철역(서울은 하루 승하차·붐비는 시간), 주차장, 대형마트·학교·학원·병원 등 10종 개수
+        - 임대료·공실(R-ONE), 매출(서울 상권만)
+        - `gaps`: 없는 데이터와 필요한 데이터·확보 방법, `provenance`: 실제 쓰인 출처
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: string }
+          description: |
+            `GET /areas` 후보 id (zone:…, seoul:…, rone:…, place:위도,경도:이름) 또는 직접 그린 범위
+            - `circle:<위도>,<경도>,<반경m>` — 반경 50~1500m
+            - `poly:<경도> <위도>,<경도> <위도>,…` — 꼭짓점 3~200개, 넓이 7㎢ 이하
+          examples:
+            zone: { value: 'zone:10133.10134' }
+            circle: { value: 'circle:37.504500,127.049000,400' }
+            polygon: { value: 'poly:127.045 37.503,127.052 37.503,127.052 37.507,127.045 37.507' }
+      responses:
+        '200':
+          description: 상권 리포트
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AreaReport' }
+        '400':
+          description: id 형식 오류
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: 없는 상권
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 범위 안에 점포가 없음
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    AssessmentId:
+      name: assessment_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^asm_[A-Za-z0-9]{20}$' }
+
+  responses:
+    BadRequest:
+      description: 요청 형식 오류
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            {
+              "type": "about:blank",
+              "title": "요청 형식 오류",
+              "status": 400,
+              "detail": "(body): 위치가 필요합니다: lat+lng 또는 address 중 하나를 보내십시오",
+              "instance": "/api/v1/assessments"
+            }
+    Unauthorized:
+      description: API 키 없음 또는 잘못됨
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    NotFound:
+      description: 없음
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    TooLarge:
+      description: 이미지가 너무 큼 (장당 5MB, 최대 4장)
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Unprocessable:
+      description: 위치를 확정할 수 없음 (좌표가 국내 밖, 주소 지오코딩 실패, 좌표와 주소가 500m 이상 차이 등)
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    RateLimited:
+      description: 호출 한도 초과
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  schemas:
+    AssessmentRequest:
+      type: object
+      description: 좌표(lat+lng) 또는 address 중 하나는 필수. 둘 다 있으면 좌표가 우선하고, 주소와 500m 이상 차이 나면 422.
+      properties:
+        lat: { type: number, minimum: 33, maximum: 39, examples: [37.5665] }
+        lng: { type: number, minimum: 124, maximum: 132, examples: [126.978] }
+        address: { type: string, maxLength: 200, examples: ['서울 중구 을지로 29'] }
+        store_name: { type: string, maxLength: 100, description: '상호명. 프랜차이즈 판별과 업종 추정에 사용' }
+        biz_no:
+          type: string
+          pattern: '^\d{10}$'
+          description: 사업자등록번호 10자리. 국세청 상태(계속·휴업·폐업) 확인에만 쓰고 저장하지 않는다.
+        industry:
+          type: string
+          description: |
+            희망 업종. 상가정보 소분류 코드(예: I21201) 또는 업종명. **권장 필드** —
+            없으면 상호명·로드뷰 간판으로 추정하며 신뢰등급이 내려간다.
+        floor_area_m2:
+          type: number
+          minimum: 1
+          description: |
+            예정 매장 면적(㎡). 생존 모델에서 가장 영향이 큰 변수라 **권장 필드** —
+            없으면 위치 전용 모델을 쓰고 신뢰등급이 내려간다.
+        floor:
+          type: integer
+          examples: [1]
+          description: |
+            매장 층. 1층 = 1, 지하1층 = -1 (0은 안 됨). 6 이상은 R-ONE "6층이상"으로 묶인다. **권장 필드** —
+            임대료를 이 층의 R-ONE 단가로 계산한다 (건물 유형은 건축물대장으로 자동 판별). 없으면 1층으로 계산한다.
+        roadview_images:
+          type: array
+          maxItems: 4
+          items: { type: string, format: binary }
+          description: 카카오맵 로드뷰 캡처. JPG/PNG/WebP, 장당 5MB 이하 (Claude API 한도). 긴 변 1568px 정도로 줄여 보내면 비용이 적다.
+        roadview_auto:
+          type: boolean
+          default: true
+          description: 이미지가 없을 때 좌표 주변 로드뷰를 자동 수집
+        radius_m:
+          type: integer
+          enum: [100, 300, 500, 1000]
+          default: 300
+          description: 경쟁점·배후 지표 집계 반경
+        include:
+          type: array
+          items: { type: string, enum: [score, sales, indicators, vision, report] }
+          default: [score, sales, indicators, vision, report]
+        client_ref: { type: string, maxLength: 64, description: '호출 측 참조 ID (그대로 돌려줌)' }
+
+    AssessmentRequestJson:
+      description: JSON 버전. 이미지는 base64로 보낸다 (외부 URL은 서버가 대신 받지 않는다 — SSRF 방지).
+      allOf:
+        - $ref: '#/components/schemas/AssessmentRequest'
+        - type: object
+          properties:
+            roadview_images: { not: {} }
+            roadview_images_base64:
+              type: array
+              maxItems: 4
+              items:
+                type: object
+                required: [data, media_type]
+                properties:
+                  data: { type: string, contentEncoding: base64 }
+                  media_type: { type: string, enum: [image/jpeg, image/png, image/webp] }
+
+    AssessmentAccepted:
+      type: object
+      required: [assessment_id, status]
+      properties:
+        assessment_id: { type: string, examples: ['asm_8fK2mQ0zXa71LpVt3cYd'] }
+        status: { $ref: '#/components/schemas/Status' }
+        estimated_seconds: { type: integer, examples: [35] }
+        links:
+          type: object
+          properties:
+            self: { type: string }
+            report: { type: string }
+            messages: { type: string }
+
+    Status:
+      type: string
+      enum: [queued, running, done, partial, failed]
+      description: 'partial = 일부 항목만 산출 (예: 로드뷰 수집 실패). 빠진 항목은 `warnings`에 사유.'
+
+    Assessment:
+      type: object
+      required: [assessment_id, status, created_at]
+      properties:
+        assessment_id: { type: string }
+        status: { $ref: '#/components/schemas/Status' }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        client_ref: { type: [string, 'null'] }
+        location: { $ref: '#/components/schemas/Location' }
+        industry: { $ref: '#/components/schemas/ResolvedIndustry' }
+        business_check:
+          type: [object, 'null']
+          description: biz_no를 보냈을 때만. 번호 자체는 돌려주지 않는다.
+          properties:
+            status: { type: string, enum: [active, suspended, closed, unknown], description: 'unknown = 국세청에 등록되지 않은 번호이거나 조회 실패' }
+            tax_type: { type: [string, 'null'], examples: [부가가치세 일반과세자] }
+            checked_at: { type: string, format: date-time }
+        score: { $ref: '#/components/schemas/Score' }
+        sales_forecast: { $ref: '#/components/schemas/SalesForecast' }
+        indicators: { $ref: '#/components/schemas/Indicators' }
+        vision: { $ref: '#/components/schemas/Vision' }
+        summary:
+          type: object
+          properties:
+            headline: { type: string, examples: ['배후 주거 수요는 충분하나 반경 300m 내 동일 업종 과밀'] }
+            opportunities: { type: array, items: { type: string } }
+            risks: { type: array, items: { type: string } }
+            unknowns: { type: array, items: { type: string }, description: '데이터로 알 수 없는 것 (예: 실제 임대 조건)' }
+        profitability:
+          type: [object, 'null']
+          description: |
+            손익분기 시뮬레이션 (업종이 정해졌을 때). 매출 = 서울 매출 모델 중앙값 → 상권 실제 평균 → 브랜드 전국 평균 ÷ 12 순.
+            임대료 = R-ONE 1층 ㎡당 × 면적(미입력 시 업종 기본). 변동비율·인건비·기타 고정비·초기 투자는 업종 일반값(가정, 브랜드면 공정위 창업 비용).
+            outputs: 월 영업이익, 손익분기 월 매출, 투자 회수 개월, 매출 대비 임대료, 매출 ±10·20% 민감도. 계산식은 화면과 공용(src/shared/profit.ts)
+          properties:
+            kind: { type: string, enum: [food, cafe, cvs, other] }
+            sales_basis: { type: [string, 'null'] }
+            rent_basis: { type: [string, 'null'] }
+            inputs: { type: object }
+            outputs: { type: object }
+            notes: { type: array, items: { type: string } }
+            sources: { type: array, items: { type: string } }
+        brand:
+          type: [object, 'null']
+          description: |
+            store_name에서 프랜차이즈 브랜드를 알아냈을 때만.
+            - info: 공정위 가맹사업 정보 (브랜드 전국 단위) — 가맹점 수, 신규·종료·해지, 근사 폐점률, 연평균 매출(원), 3.3㎡당 매출, 창업 비용(가맹비·교육비·보증금·기타), 최근 3년 추이
+            - same_brand: 반경 1km 안 같은 브랜드 매장 (500m·1km 개수, 가까운 순 목록, at_site = 15m 안에 이미 매장 있음). 500m 안에 있으면 warnings에 영업지역 확인 안내
+          properties:
+            info: { type: [object, 'null'] }
+            same_brand: { type: [object, 'null'] }
+            sources: { type: array, items: { type: string } }
+        provenance:
+          type: array
+          items: { $ref: '#/components/schemas/Provenance' }
+        warnings: { type: array, items: { type: string } }
+        error:
+          type: [object, 'null']
+          description: status=failed일 때만
+          properties:
+            title: { type: string }
+            status: { type: integer }
+            detail: { type: string }
+        disclaimer:
+          type: string
+          const: 본 결과는 공공·추정 데이터 기반 참고 자료이며 투자 또는 출자 판단을 대신하지 않습니다.
+        usage:
+          type: object
+          description: 비용 추적용
+          properties:
+            llm_input_tokens: { type: integer }
+            llm_output_tokens: { type: integer }
+            elapsed_ms: { type: integer }
+
+    Location:
+      type: object
+      properties:
+        lat: { type: number }
+        lng: { type: number }
+        address_road: { type: [string, 'null'] }
+        address_jibun: { type: [string, 'null'] }
+        pnu: { type: [string, 'null'], description: 필지고유번호 19자리 }
+        adm_cd: { type: string, description: 행정동 8자리 }
+        adm_nm: { type: string }
+        sgg_nm: { type: string }
+        sido_nm: { type: string }
+        trade_area:
+          type: [object, 'null']
+          description: 서울 상권분석 상권 (서울만)
+          properties:
+            code: { type: string }
+            name: { type: string }
+            type: { type: string, enum: [골목상권, 발달상권, 전통시장, 관광특구] }
+            distance_m: { type: number, description: 상권 중심점까지 거리 (상권 경계 대신 중심점+면적으로 판정) }
+        sbiz_zone:
+          type: [object, 'null']
+          description: 소상공인 상권영역(전국 1,227곳) 중 위치를 포함하는 상권 (경계 다각형으로 판정)
+          properties:
+            no: { type: string }
+            name: { type: string, examples: [을지로입구역1-1번 출구] }
+            sgg_nm: { type: string }
+            area_m2: { type: number }
+        coverage: { type: string, enum: [seoul, national] }
+
+    ResolvedIndustry:
+      type: object
+      properties:
+        code: { type: string, examples: [I21201] }
+        name: { type: string, examples: [카페] }
+        method: { type: string, enum: [input, store_name, roadview, unknown] }
+        mcls_name: { type: [string, 'null'] }
+        lcls_name: { type: [string, 'null'] }
+        franchise_brand: { type: [string, 'null'], description: 공정위 가맹사업 브랜드명과 상호 앞부분이 일치할 때 }
+        confidence: { $ref: '#/components/schemas/Confidence' }
+        seoul_cs: { type: [string, 'null'], description: 서울 상권분석 서비스업종 코드 (매출 모델용) }
+        license_uptae: { type: [string, 'null'], description: '일반음식점 인허가 업태 (생존 모델용). null이면 생존 확률이 빠짐 — 다른 업종은 업종별 인허가 데이터 추가 예정' }
+
+    Score:
+      type: object
+      description: |
+        종합 점수 0~100. 중심은 **3년 생존 확률 모델**(전국 인허가 학습)이고,
+        세부 항목은 같은 업종 안에서의 백분위다. 정의는 docs/08_API_명세.md 4장.
+      properties:
+        total: { type: number, minimum: 0, maximum: 100 }
+        grade:
+          type: [string, 'null']
+          enum: [A, B, C, D, E, null]
+          description: 'A ≥80, B ≥60, C ≥40, D ≥20, E <20. 생존 모델이 없거나 evidence_weight < 0.75면 최대 B, evidence_weight < 0.3이면 등급 보류(null)'
+        survival_3y_prob:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: 이 위치·업종에 신규 개업 시 3년 내 폐업하지 않을 확률 (음식점 업종만 v0)
+        components:
+          type: array
+          items:
+            type: object
+            required: [key, value]
+            properties:
+              key: { type: string, enum: [survival, demand, competition, sales_power, vision] }
+              label: { type: string, examples: [경쟁 강도] }
+              value: { type: [number, 'null'], minimum: 0, maximum: 100 }
+              weight: { type: number }
+              basis: { type: string, examples: ['반경 300m 동일 업종 영업 점포 12곳, 서울 같은 업종 중 하위 25%'] }
+              confidence: { $ref: '#/components/schemas/Confidence' }
+              reason: { type: string, description: 이 값이 나온 이유 한 문장, examples: ['같은 업종이 서울 평균보다 29% 더 몰려 있어 35.7점이다.'] }
+              method: { type: string, description: 계산 방법 }
+              inputs:
+                type: array
+                description: 계산에 쓴 숫자와 그 출처
+                items:
+                  type: object
+                  properties:
+                    label: { type: string, examples: [반경 300m 같은 업종] }
+                    value: { type: string, examples: [73곳] }
+                    source: { type: string, description: 'provenance[].key' }
+              sources: { type: array, items: { type: string }, description: 'provenance[].key 목록' }
+        evidence_weight: { type: number, description: 데이터가 있었던 항목의 가중치 합 (1 = 전부). 빠진 항목은 가중치를 나머지에 재배분 }
+        explanation:
+          type: object
+          description: 종합 점수와 등급의 판단 근거
+          properties:
+            formula: { type: string, examples: ['(24.6×50% + 48.4×15% + 35.7×15% + 98.3×10%) ÷ 90% = 38.6점'] }
+            grade_reason: { type: string, examples: ['38.6점은 20~40점 구간이라 D(주의)다.'] }
+            lifts: { type: array, items: { type: string }, description: 종합 점수를 가장 많이 올린 항목 (최대 2) }
+            drags: { type: array, items: { type: string }, description: 종합 점수를 가장 많이 내린 항목 (최대 2) }
+            missing: { type: array, items: { type: string }, description: 데이터가 없어 빠진 항목과 이유 }
+            rules: { type: array, items: { type: string }, description: 점수 규칙 }
+        model_version: { type: string, examples: [score-v0.1] }
+
+    SalesForecast:
+      type: object
+      description: |
+        점포당 월 매출 추정 범위. 공공데이터만 쓰는 v0는 오차가 크므로 범위(p10~p90)로 제공한다.
+        v0는 서울 상권 안에서만 값이 있다. 서울시 추정매출(thsmon_selng_amt)은 월 단위로 본다 (2026-10-30 결정).
+      properties:
+        unit: { type: string, const: KRW/month }
+        p10: { type: [number, 'null'] }
+        p50: { type: [number, 'null'] }
+        p90: { type: [number, 'null'] }
+        benchmark:
+          type: [object, 'null']
+          description: 같은 상권 같은 업종의 점포당 평균 (서울 상권분석, 신뢰 A)
+          properties:
+            value: { type: [number, 'null'] }
+            scope: { type: string, examples: ['상권 을지로입구역 · 한식음식점 · 2026Q2'] }
+            confidence: { $ref: '#/components/schemas/Confidence' }
+        confidence: { $ref: '#/components/schemas/Confidence' }
+        model_version: { type: string, examples: [sales-v0] }
+        note: { type: string, description: '값이 없을 때 이유와 필요한 데이터·확보 방법' }
+        sources: { type: array, items: { type: string }, description: 'provenance[].key — model_sales(예상 범위), seoul_sales(추정매출), seoul_store(점포 수)', examples: [[model_sales, seoul_sales, seoul_store]] }
+        method:
+          type: [object, 'null']
+          description: 화면의 "이 매출은 어디서 왔나요?"에 그대로 쓰는 산출 설명
+          properties:
+            range: { type: string, description: 예상 범위(p10~p90) 계산 방법 }
+            benchmark: { type: string, description: 상권 실제 평균 계산 방법 }
+            origin: { type: string, description: '원천 데이터의 성격 (서울시 추정매출, 실측 아님)' }
+            accuracy: { type: string, description: 검증 오차 }
+
+    Indicators:
+      type: object
+      properties:
+        floating_pop:
+          type: [object, 'null']
+          description: 서울 상권분석 유동인구 (서울 상권 안만). 서울 밖은 flowpop_dong을 본다
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            quarter_total: { type: number, description: 분기 합계 (서울시 tot_flpop_co) }
+            by_time: { type: object, additionalProperties: { type: number }, description: 시간대 비중, examples: [{ '06-11': 0.18, '11-14': 0.22 }] }
+            share_2030: { type: number }
+            weekend_share: { type: number }
+            as_of: { type: string }
+            scope: { type: string }
+        living_pop:
+          type: [object, 'null']
+          description: |
+            생활인구 — 그 시간에 그 동에 있던 사람 수. 서울은 250m 격자를 행정동으로 합산한 최근 1주 (2026-08부터 행정동 단위 생산 종료),
+            부산은 행정동 생활인구 최근 월 하루 평균 (주거+직장+방문). 그 밖 지역은 null
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            hourly_avg: { type: number }
+            by_time: { type: object, additionalProperties: { type: number } }
+            as_of: { type: string }
+            scope: { type: string }
+        flowpop_dong:
+          type: [object, 'null']
+          description: |
+            서울 밖 행정동 유동인구 (내국인 시간당 평균). 경기는 실측(경기데이터드림, 원천 KT), 그 밖은 경기 실측 408개 행정동으로 학습한 추정값
+            (flowpop-v0, 시 단위 검증 R² 0.89·중앙 오차 14%). 수요 점수에 유동 50%로 들어간다.
+            **내부 심사 한정** — 서버를 DATA_SCOPE=external로 띄우면 null. 외부 제공 범위는 실 서비스 오픈 전 외부 자문으로 정한다.
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key — gg_flowpop(실측) 또는 model_flowpop + gg_flowpop(추정)' }
+            kind: { type: string, enum: [measured, estimated] }
+            hourly_avg: { type: number, examples: [9715] }
+            range: { type: [array, 'null'], items: { type: number }, description: '추정일 때 80% 범위 (p10, p90). 실측이면 null', examples: [[6392, 13970]] }
+            by_time: { type: object, additionalProperties: { type: number }, description: '시간대 비중 (추정이면 특성이 비슷한 경기 행정동 10곳 평균)' }
+            out_of_range: { type: number, description: '0~1. 이 동의 특성 중 학습 범위(경기) 밖인 비율 — 클수록 범위를 넓게 잡음' }
+            as_of: { type: string, examples: ['2026-08'] }
+            scope: { type: string }
+            license: { type: string, description: 이용 범위 (내부 심사 한정) }
+        residents:
+          type: object
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            population: { type: integer }
+            households: { type: integer }
+            apt_households: { type: [integer, 'null'] }
+            scope: { type: string, examples: [행정동, 상권] }
+        nps_workers:
+          type: [object, 'null']
+          description: |
+            국민연금 가입 사업장 (국민연금공단, 법정동, 월별). 직원은 본사 주소로 등록돼 대기업·프랜차이즈·용역 회사는 실제 근무지와 다르므로
+            300인 이하 사업장만 그 동의 직장인으로 본다(members_small). 주소에 번지가 없어 건물 단위는 없음
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key — nps_workplace' }
+            workplaces: { type: integer }
+            members_small: { type: integer, description: 300인 이하 사업장 가입자 합 }
+            members_all: { type: integer, description: 전체 가입자 합 (본사 등록 인원 포함, 참고) }
+            monthly_income_est: { type: [integer, 'null'], description: '1인 월 소득 추정(원) = 고지금액 ÷ 가입자 ÷ 9.5%. 기준소득 상한 때문에 고소득은 낮게 잡힘' }
+            top_employers: { type: array, items: { type: object, properties: { name: { type: string }, members: { type: integer }, industry: { type: string } } }, description: 300인 이하 법인 상위 5곳 }
+            as_of: { type: string, examples: ['2026-09'] }
+            scope: { type: string }
+        resident_registry:
+          type: [object, 'null']
+          description: 주민등록 인구·세대 (행정안전부, 법정동 = 필지 PNU 앞 10자리, 월별). residents(SGIS 연 1회)보다 최신이고 1년 증감을 준다
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key — resident_registry' }
+            population: { type: integer }
+            households: { type: integer }
+            persons_per_household: { type: [number, 'null'] }
+            population_change_pct: { type: [number, 'null'], description: 12개월 전 대비 증감률(%) }
+            households_change_pct: { type: [number, 'null'] }
+            share_20_39: { type: [number, 'null'], description: 20~39세 비율 (0~1) }
+            share_60_plus: { type: [number, 'null'], description: 60세 이상 비율 (0~1) }
+            as_of: { type: string, examples: ['2026-10'] }
+            scope: { type: string }
+        workers:
+          type: object
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            workers: { type: integer }
+            businesses: { type: [integer, 'null'] }
+            scope: { type: string }
+        competitors:
+          type: object
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            radius_m: { type: integer }
+            same_industry: { type: [integer, 'null'], description: 같은 소분류 }
+            same_mcls: { type: [integer, 'null'], description: 같은 중분류 }
+            all_stores: { type: integer }
+            branch_share: { type: [number, 'null'], description: 상가정보 지점명이 있는 비율 (프랜차이즈 근사) }
+            franchise_share: { type: [number, 'null'], description: 같은 업종 중 공정위 가맹 브랜드로 잡힌 비율 (상호 별칭 규칙, 직영 브랜드는 빠짐) }
+            location_quotient: { type: [number, 'null'], description: '입지계수 = (반경 내 업종 비중) / (서울 전체 업종 비중). 1 평균, 2 이상 과밀' }
+            scope: { type: string }
+            nearest:
+              type: array
+              maxItems: 10
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  brand: { type: [string, 'null'], description: '공정위 대표 브랜드 (상호 별칭 규칙). 개인 점포·직영이면 null' }
+                  industry: { type: string }
+                  distance_m: { type: number }
+                  floor: { type: [string, 'null'] }
+                  lat: { type: number }
+                  lng: { type: number }
+        supply_pipeline:
+          type: [object, 'null']
+          description: |
+            앞으로 생길 공급·수요 (건축HUB 인허가). 비주거는 좌표가 없어 반경 안 점포의 법정동 범위로 근사하고 건물(PNU)별 최신 기록만 쓴다.
+            주택은 좌표를 찾은 3년 내 입주 예정 100세대 이상 단지만 1km 반경
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key — arch_permit, housing_permit' }
+            under_construction_m2:
+              type: object
+              description: 착공했고 사용승인 전인 비주거 연면적(㎡)
+              properties: { retail: { type: integer, description: 근린생활·판매 }, office: { type: integer }, lodging: { type: integer }, other: { type: integer }, buildings: { type: integer } }
+            permitted_m2: { type: integer, description: 2024년 이후 허가만 나고 착공 전인 연면적 }
+            upcoming_households_3y: { type: integer }
+            projects:
+              type: array
+              items: { type: object, properties: { kind: { type: string, enum: [commercial, housing] }, name: { type: [string, 'null'] }, purpose: { type: string }, size: { type: string }, schedule: { type: string } } }
+            scope: { type: string }
+        food_license_churn:
+          type: [object, 'null']
+          description: 반경 내 일반음식점 인허가 기준 영업·개업·폐업 수 (음식점 업종일 때, 전국)
+          properties:
+            radius_m: { type: integer }
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            active: { type: integer }
+            opened_12m: { type: integer }
+            closed_12m: { type: integer }
+            as_of: { type: string }
+        rent:
+          type: [object, 'null']
+          description: |
+            한국부동산원 R-ONE 임대동향. 반경 1km 안의 조사 상권(대표 지점 기준) 값, 없으면 시도 평균.
+            상권 평균이라 개별 점포의 실제 임대료와 다를 수 있다.
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            area: { type: string, examples: ['서울 › 도심 › 시청'] }
+            match: { type: string, enum: [상권, 시도 평균] }
+            distance_m: { type: [number, 'null'], description: 조사 상권 대표 지점까지 거리 }
+            quarter: { type: string, examples: [2026년 3분기] }
+            building_type: { type: string, examples: [중대형 상가] }
+            rent_by_floor:
+              type: array
+              items:
+                type: object
+                properties:
+                  floor: { type: string, examples: [1층] }
+                  won_per_m2: { type: number, description: ㎡당 월 임대료(원) }
+            small_shop_1f_won_per_m2: { type: [number, 'null'], description: 소규모 상가 1층 ㎡당 월 임대료 }
+            vacancy_rate:
+              type: object
+              properties:
+                mid_large: { type: [number, 'null'], description: 중대형 상가 공실률(%) }
+                small: { type: [number, 'null'], description: 소규모 상가 공실률(%) }
+                quarter: { type: [string, 'null'] }
+            est_monthly_rent_1f: { type: [number, 'null'], description: 'floor_area_m2 × 중대형 상가 1층 ㎡당 임대료 (면적을 보냈을 때만). 적용 단가 기준은 applied.monthly_rent' }
+            by_type:
+              type: array
+              description: '건물 유형별 층별 ㎡당 월 임대료와 공실률 — R-ONE이 이 상권에서 조사한 유형만. 소규모 상가는 지하1층·1층·2층만 조사'
+              items:
+                type: object
+                properties:
+                  type: { type: string, enum: [중대형 상가, 소규모 상가, 집합 상가] }
+                  quarter: { type: string }
+                  floors: { type: array, items: { type: object, properties: { floor: { type: string, examples: [6층이상] }, won_per_m2: { type: number } } } }
+                  vacancy_rate: { type: [number, 'null'], description: 공실률(%) }
+            applied:
+              type: [object, 'null']
+              description: '이 점포에 적용한 단가 = 건물 유형(건축물대장) × 층(floor). 손익 시뮬레이션 임대료도 이 값'
+              properties:
+                building_type: { type: string, enum: [중대형 상가, 소규모 상가, 집합 상가] }
+                type_reason: { type: string, examples: ['건축물대장 일반건물 · 지상 5층 · 연면적 1,234㎡ (3층 이상 또는 330㎡ 초과)'], description: 'R-ONE 기준 — 중대형: 일반건물 3층 이상 또는 연면적 330㎡ 초과, 소규모: 2층 이하·330㎡ 이하, 집합: 구분소유. 건축물대장이 없으면 중대형' }
+                floor: { type: string, examples: [1층] }
+                floor_input: { type: [integer, 'null'] }
+                won_per_m2: { type: number }
+                area_m2: { type: [number, 'null'] }
+                monthly_rent: { type: [number, 'null'], description: 'area_m2 × won_per_m2 (면적을 보냈을 때만, 만 원 단위 반올림)' }
+                fallback: { type: [string, 'null'], description: '고른 유형·층의 조사값이 없어 다른 유형이나 1층 값을 쓴 경우 설명' }
+            note: { type: string }
+        store_change:
+          type: [object, 'null']
+          description: '반경 안 점포 증감 — 최근 두 상가정보 스냅샷 비교. 이전 스냅샷이 있는 지역만 (현재 서울 2026-06→09)'
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            radius_m: { type: integer }
+            from: { type: string, examples: ['2026-06'] }
+            to: { type: string, examples: ['2026-09'] }
+            same_industry:
+              type: [object, 'null']
+              properties:
+                closed: { type: integer, description: 사라진 점포 (번호 변경 포함) }
+                opened: { type: integer }
+                before: { type: integer }
+            all:
+              type: object
+              properties:
+                closed: { type: integer }
+                opened: { type: integer }
+                before: { type: integer }
+        buildings:
+          type: [object, 'null']
+          description: '해당 필지(PNU)의 건축물대장 — 국토교통부 건축HUB 표제부·층별개요, 실시간. 대장이 없는 위치(도로·공터)면 null'
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            address: { type: [string, 'null'] }
+            buildings:
+              type: array
+              description: 주건축물이 먼저, 그다음 연면적 순
+              items:
+                type: object
+                properties:
+                  name: { type: string, description: '건물명 + 동명 (없으면 빈 문자열)' }
+                  kind: { type: string, examples: ['일반건축물 · 주건축물'] }
+                  main_use: { type: string, examples: [제2종근린생활시설] }
+                  detail_use: { type: string }
+                  structure: { type: string, examples: [철근콘크리트구조] }
+                  floors_above: { type: [integer, 'null'] }
+                  floors_below: { type: [integer, 'null'] }
+                  height_m: { type: [number, 'null'] }
+                  total_area_m2: { type: [number, 'null'], description: 연면적 }
+                  building_area_m2: { type: [number, 'null'], description: 건축면적 }
+                  site_area_m2: { type: [number, 'null'], description: 대지면적 }
+                  coverage_ratio: { type: [number, 'null'], description: 건폐율(%) }
+                  floor_area_ratio: { type: [number, 'null'], description: 용적률(%) }
+                  approval_date: { type: [string, 'null'], format: date, description: 사용승인일 }
+                  age_years: { type: [integer, 'null'] }
+                  households: { type: [integer, 'null'] }
+                  elevators: { type: [integer, 'null'] }
+                  parking: { type: [integer, 'null'] }
+                  seismic_design: { type: [boolean, 'null'] }
+            floors:
+              type: array
+              items:
+                type: object
+                properties:
+                  building: { type: string }
+                  floor: { type: string, examples: [1층] }
+                  use: { type: string, examples: [소매점] }
+                  detail_use: { type: string }
+                  area_m2: { type: [number, 'null'] }
+            floors_truncated: { type: boolean, description: 층이 100개를 넘어 일부만 담겼는지 }
+        land_price:
+          type: [object, 'null']
+          description: 브이월드 연속지적 공시지가 (실시간)
+          properties:
+            sources: { type: array, items: { type: string }, description: 'provenance[].key' }
+            official_price_per_m2: { type: number, description: 원/㎡ }
+            year_month: { type: [string, 'null'], examples: ['2025-01'] }
+
+    Vision:
+      type: [object, 'null']
+      description: 로드뷰 이미지 판독 결과 (Claude 비전). 보조 지표이며 점수 가중치는 10%.
+      properties:
+        images_used: { type: integer }
+        area_type: { type: string, examples: [주거지상권] }
+        scores:
+          type: object
+          properties:
+            pedestrian: { type: number, description: 보행 유동 체감 (0-100) }
+            accessibility: { type: number }
+            visibility: { type: number }
+            commercial_density: { type: number }
+            facility_condition: { type: number }
+        observations:
+          type: object
+          properties:
+            road: { type: string }
+            sidewalk: { type: string }
+            visible_stores:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  industry: { type: string }
+                  floor: { type: string }
+            vacancy_signs: { type: array, items: { type: string } }
+        cannot_tell: { type: array, items: { type: string } }
+        confidence: { $ref: '#/components/schemas/Confidence' }
+        model: { type: string, examples: [claude-opus-5-5] }
+
+    Report:
+      type: object
+      properties:
+        title: { type: string }
+        sections:
+          type: array
+          items:
+            type: object
+            properties:
+              heading: { type: string }
+              body_markdown: { type: string }
+
+    ChatReply:
+      type: object
+      properties:
+        message_id: { type: string }
+        text: { type: string }
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/Provenance' }
+
+    ChatMessage:
+      type: object
+      properties:
+        message_id: { type: string }
+        role: { type: string, enum: [user, assistant] }
+        text: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Coverage:
+      type: object
+      properties:
+        coverage: { type: string, enum: [seoul, national] }
+        adm_nm: { type: string }
+        trade_area: { type: [object, 'null'], description: 서울 상권 (Location.trade_area와 같음) }
+        items:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              available: { type: boolean }
+              confidence: { $ref: '#/components/schemas/Confidence' }
+              note: { type: string }
+          examples:
+            - score: { available: true, confidence: B }
+              floating_pop: { available: false, note: '서울 상권 유동인구는 서울만 있음. 서울 밖은 flowpop_dong 참고' }
+              flowpop_dong: { available: true, confidence: C, note: '경기 실측으로 학습한 추정값 (내부 심사 한정)' }
+              sales_forecast: { available: true, confidence: C }
+
+    AreaCandidate:
+      type: object
+      properties:
+        id: { type: string, description: '/areas/report?id= 에 그대로 넣는다' }
+        name: { type: string }
+        kind: { type: string, enum: [sbiz_zone, seoul_trdar, rone_area, place, custom_circle, custom_polygon] }
+        detail: { type: string }
+        lat: { type: number }
+        lng: { type: number }
+        boundary: { type: string, enum: [polygon, circle] }
+        radius_m: { type: [integer, 'null'] }
+
+    AreaReport:
+      type: object
+      properties:
+        area:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            kind: { type: string, enum: [sbiz_zone, seoul_trdar, rone_area, place, custom_circle, custom_polygon] }
+            basis: { type: string, description: 범위를 정한 방법 }
+            lat: { type: number }
+            lng: { type: number }
+            radius_m: { type: [integer, 'null'] }
+            area_m2: { type: integer }
+            polygons: { type: [array, 'null'], description: '상권영역별 링 목록 [[[lng, lat], …], …]', items: {} }
+            sido_nm: { type: [string, 'null'] }
+            sgg_nm: { type: [string, 'null'] }
+        industry:
+          type: object
+          properties:
+            total: { type: integer }
+            baseline_area: { type: string, description: 배수(lq)의 기준 시도 }
+            lcls: { type: array, items: { type: object, properties: { name: { type: string }, count: { type: integer }, share: { type: number }, lq: { type: [number, 'null'], description: '이 상권 비중 ÷ 같은 시도 비중' }, mcls: { type: array, items: {} } } } }
+            food: { type: array, items: {}, description: '음식점 중분류 (한식·중식·일식·서양식·주점·비알코올…)' }
+            top_scls: { type: array, items: {} }
+            floors: { type: array, items: {} }
+            branch_share: { type: number }
+            sources: { type: array, items: { type: string } }
+        points: { type: array, items: { type: array, items: {} }, description: '[lng, lat, 대분류, 상호, 소분류, 층]' }
+        store_change: { type: [object, 'null'] }
+        food_trend: { type: [object, 'null'] }
+        population: { type: object, description: 'seoul (서울 상권 합산) · dongs (행정동별) · dong_sources' }
+        transport: { type: object, description: 'stations (승하차 포함) · parking_lots · bus_stops(null, 준비 중) · facilities' }
+        rent: { type: [object, 'null'] }
+        sales: { type: [object, 'null'], description: 서울 상권만 }
+        lifecycle:
+          type: object
+          description: '상권 생애주기 — 성장·성숙·쇠퇴·재생·판단 보류. 음식점 인허가 최근 3년 vs 그 전 3년 순증과 개업 속도, R-ONE 1층 임대료·공실률 1년 변화'
+          properties:
+            stage: { type: string, enum: [성장, 성숙, 쇠퇴, 재생, 판단 보류] }
+            reason: { type: string }
+            evidence: { type: array, items: { type: string } }
+            metrics: { type: [object, 'null'] }
+        gaps: { type: array, items: { type: string }, description: '없는 데이터 — 필요한 데이터와 확보 방법' }
+        warnings: { type: array, items: { type: string } }
+        provenance: { type: array, items: { $ref: '#/components/schemas/Provenance' } }
+        generated_at: { type: string, format: date-time }
+        elapsed_ms: { type: integer }
+
+    Industry:
+      type: object
+      properties:
+        code: { type: string }
+        name: { type: string }
+        mcls_name: { type: string }
+        lcls_name: { type: string }
+        survival_model: { type: boolean, description: 생존 확률 제공 여부 (v0는 음식점만) }
+
+    Confidence:
+      type: string
+      enum: [A, B, C]
+      description: 'A 실측·공식 통계 / B 실측 기반 계산·근사 / C 모델 추정·대리 지표'
+
+    Provenance:
+      type: object
+      description: 이 평가에 실제로 쓰인 데이터 출처. 화면의 [번호]는 이 배열의 순서(1부터)다.
+      properties:
+        key: { type: string, examples: [seoul_flpop], description: '지표의 sources, 점수 항목의 sources·inputs[].source가 가리키는 키' }
+        provider: { type: string, examples: ['서울시 (서울 열린데이터광장)'] }
+        source: { type: string, description: provider와 같음 (이전 형식 호환) }
+        dataset: { type: string, examples: ['서울시 상권분석서비스 — 길단위인구(상권)'] }
+        api: { type: string, examples: ['openapi.seoul.go.kr · VwsmTrdarFlpopQq'] }
+        fields: { type: string, examples: ['tot_flpop_co(총 유동인구), 시간대별·연령대별·요일별 유동인구'] }
+        scope: { type: string, examples: ['상권 단위, 분기'] }
+        as_of: { type: string, examples: [2026년 2분기] }
+        used_for: { type: array, items: { type: string }, examples: [[유동인구]] }
+        license: { type: string, description: '이용 범위 제한이 있는 소스만 붙는다 (예: 내부 심사 한정 — 원천 공공누리 2유형)' }
+
+    Problem:
+      type: object
+      description: RFC 9457
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
